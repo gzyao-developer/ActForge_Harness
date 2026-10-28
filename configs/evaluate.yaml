@@ -1,0 +1,11 @@
+# 逐步自动评估（开发文档外能力）
+enabled: true
+threshold: 0.70          # 低于此分重做当前动作；勿调到接近 0，否则 grasp_miss 也会被当成 PASS
+max_retries: 7           # 当前步骤最多额外重试次数（不含首次）
+on_exhausted: continue   # continue=仍进入下一步 | fail_task=任务失败
+# 重试时若评估器给出建议参数，自动合并进 args 再执行
+apply_suggestions: true
+# 评估失败时：先把画面/世界恢复到本步执行前，再重做（Harness 实时控制 GUI）
+rewind_on_retry: true
+# 回退后稍停，方便肉眼看清「重做」（秒）；--real-time 时更明显
+rewind_pause_sec: 0.35

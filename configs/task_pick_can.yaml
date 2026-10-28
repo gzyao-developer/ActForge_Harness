@@ -1,0 +1,17 @@
+task_id: pick_can
+goal:
+  type: pick_object
+  object_id: can_cola
+  min_lift_z: 0.10
+  require_returned_home: true
+
+limits:
+  max_steps: 28
+  timeout_sec: 300
+
+skills:
+  dir: skills
+  require_load_for_demo: true
+
+aliases:
+  can_cola: ["易拉罐", "可乐罐", "罐子", "can", "cola"]

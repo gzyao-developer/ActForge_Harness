@@ -1,0 +1,42 @@
+scene_id: desk_v1
+description: "单桌面，一罐一干扰杯，简化臂"
+
+table:
+  z: 0.0
+  x_min: -0.5
+  x_max: 0.5
+  y_min: -0.5
+  y_max: 0.5
+
+robot:
+  ee_pose: { x: 0.0, y: -0.35, z: 0.25, yaw: 0.0 }
+  gripper: open
+  holding: null
+
+objects:
+  - id: can_cola
+    label: cola_can
+    display_name: 易拉罐
+    xyz: { x: 0.10, y: 0.05, z: 0.06 }
+    yaw: 0.0
+    radius: 0.033
+    height: 0.12
+    graspable: true
+
+  - id: cup_white
+    label: cup
+    display_name: 白杯子
+    xyz: { x: -0.15, y: 0.08, z: 0.05 }
+    yaw: 0.0
+    radius: 0.04
+    height: 0.09
+    graspable: true
+
+grasp:
+  xy_tolerance: 0.03
+  z_tolerance: 0.12      # 覆盖 move_above 后默认 move_down(0.08) 的高度差
+  lift_after_grasp: 0.10
+
+motion:
+  default_z_offset: 0.12
+  step_sleep_sec: 0.0

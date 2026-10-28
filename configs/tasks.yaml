@@ -1,0 +1,17 @@
+# 任务预设：CLI 可根据指令自动选择
+defaults:
+  pick_can:
+    scene: configs/scene_desk_v1.yaml
+    task: configs/task_pick_can.yaml
+    prompt: prompts/pick_can_system.md
+  coupling_clean:
+    scene: configs/scene_coupling_v1.yaml
+    task: configs/task_coupling_clean.yaml
+    prompt: prompts/coupling_clean_system.md
+
+# 指令关键词 → 任务 id（先匹配到的优先，列表靠前优先）
+routing:
+  - id: coupling_clean
+    keywords: ["接箍", "擦拭", "抹布", "内径", "测量尺", "量尺", "清洁", "wipe", "coupling"]
+  - id: pick_can
+    keywords: ["易拉罐", "可乐", "罐子", "拿起来", "抓取", "pick", "can", "cola"]
