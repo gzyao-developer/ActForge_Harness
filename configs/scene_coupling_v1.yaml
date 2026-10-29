@@ -1,5 +1,5 @@
 scene_id: coupling_v1
-description: "单桌面：接箍 + 抹布 + 测量尺，用于内壁擦拭与内径测量"
+description: "单桌面：接箍A/B + 抹布 + 测量尺，用于中径擦测"
 
 table:
   z: 0.0
@@ -14,22 +14,35 @@ robot:
   holding: null
 
 objects:
-  - id: coupling
+  - id: coupling_A
     label: coupling
-    display_name: 接箍
+    display_name: 接箍A
     shape: ring
-    xyz: { x: 0.12, y: 0.05, z: 0.04 }
+    xyz: { x: 0.08, y: 0.10, z: 0.04 }
     yaw: 0.0
     radius: 0.06
     inner_radius: 0.045
     height: 0.08
     graspable: false
+    rgba: [0.55, 0.58, 0.62, 1.0]
+
+  - id: coupling_B
+    label: coupling
+    display_name: 接箍B
+    shape: ring
+    xyz: { x: 0.08, y: -0.12, z: 0.04 }
+    yaw: 0.0
+    radius: 0.06
+    inner_radius: 0.045
+    height: 0.08
+    graspable: false
+    rgba: [0.45, 0.52, 0.70, 1.0]
 
   - id: rag
     label: rag
     display_name: 抹布
     shape: box
-    xyz: { x: 0.28, y: 0.05, z: 0.01 }
+    xyz: { x: 0.30, y: 0.10, z: 0.01 }
     yaw: 0.0
     size: { x: 0.08, y: 0.06, z: 0.02 }
     radius: 0.04
@@ -40,7 +53,7 @@ objects:
     label: ruler
     display_name: 测量尺
     shape: box
-    xyz: { x: 0.28, y: -0.12, z: 0.01 }
+    xyz: { x: 0.30, y: -0.12, z: 0.01 }
     yaw: 0.2
     size: { x: 0.18, y: 0.02, z: 0.01 }
     radius: 0.05
@@ -56,8 +69,19 @@ motion:
   default_z_offset: 0.12
   step_sleep_sec: 0.0
 
-# 接箍任务语义参数
+# 接箍中径擦测：两件接箍分别擦测；复核为模拟人工确认
 coupling:
   wipe_xy_tolerance: 0.10
   measure_xy_tolerance: 0.10
+  nominal_pitch_diameter_mm: 90.0
   nominal_inner_diameter_mm: 90.0
+  tolerance_abs_mm: 0.05
+  workpieces:
+    A:
+      object_id: coupling_A
+      delta_d_mm: 0.020
+      review_result: clean
+    B:
+      object_id: coupling_B
+      delta_d_mm: 0.080
+      review_result: clean

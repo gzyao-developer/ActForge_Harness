@@ -78,6 +78,12 @@ class StepEvaluator:
             "return_home": self._eval_ok_action,
             "wipe_inner": self._eval_ok_action,
             "measure_inner": self._eval_ok_action,
+            "task_admit": self._eval_ok_action,
+            "wipe_return": self._eval_ok_action,
+            "cleaning_review": self._eval_ok_action,
+            "report_measurement": self._eval_ok_action,
+            "rule_judge": self._eval_ok_action,
+            "archive_record": self._eval_ok_action,
             "done": self._eval_done,
         }.get(action, self._eval_ok_action)
 
@@ -300,7 +306,14 @@ class StepEvaluator:
 
         if holding == self.goal_object_id:
             return _grade_grasp(holding)
-        # Multi-tool tasks (goal not graspable, e.g. coupling): any successful grasp is fine
+        # Coupling A/B (or missing goal id): tools rag/ruler are valid grasps
+        coupling_task = bool(world.coupling_cfg.get("workpieces")) or (
+            goal_obj is not None and not goal_obj.graspable
+        )
+        if holding and coupling_task:
+            held = world.objects.get(holding)
+            if held is not None and held.graspable:
+                return _grade_grasp(holding)
         if holding and goal_obj is not None and not goal_obj.graspable:
             return _grade_grasp(holding)
         if holding and holding != self.goal_object_id:
@@ -384,6 +397,31 @@ class StepEvaluator:
         before: Optional[WorldState],
     ) -> EvaluateResult:
         flags = world.task_flags or {}
+        archived = list(flags.get("archived_workpieces") or [])
+        if archived:
+            if world.robot.holding is not None:
+                return self._fail(
+                    0.4,
+                    "hand_not_empty",
+                    {"holding": world.robot.holding},
+                    feedback="接箍任务完成前请 place_home 放回工具并 return_home",
+                )
+            if not flags.get("returned_home"):
+                return self._fail(
+                    0.55,
+                    "not_returned_home",
+                    {"returned_home": False},
+                    feedback="请先 return_home 再 done",
+                )
+            return self._pass(
+                0.96,
+                "done_coupling",
+                {
+                    "archived_workpieces": archived,
+                    "workpiece_results": flags.get("workpiece_results"),
+                    "returned_home": True,
+                },
+            )
         if flags.get("coupling_wiped") and flags.get("coupling_measured"):
             if world.robot.holding is not None:
                 return self._fail(

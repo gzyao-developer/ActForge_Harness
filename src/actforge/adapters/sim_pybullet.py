@@ -289,8 +289,10 @@ class PyBulletSim:
         self._step(n)
 
     def _viz_wait(self, seconds: float) -> None:
-        """Wall-clock pause so GUI users can see the pose (even without --real-time)."""
-        if not self.gui or seconds <= 0:
+        """Wall-clock pause only with --gui --real-time (otherwise keep demo snappy)."""
+        if not self.gui or not self.real_time or seconds <= 0:
+            if self.gui and seconds > 0:
+                self._step(max(1, int(seconds * 30)))
             return
         end = time.time() + seconds
         while time.time() < end:
@@ -305,11 +307,17 @@ class PyBulletSim:
         duration_sec: float = 0.8,
         hold_sec: float = 0.0,
     ) -> None:
-        """Slow EE move timed in wall-clock seconds (GUI-visible scrub / dip)."""
+        """EE move for wipe/measure. Wall-clock pacing only when --real-time."""
         start = world.robot.ee_pose
-        # ~20 poses/sec looks continuous on slow GPUs
-        frames = max(12, int(duration_sec * 20))
-        dt = duration_sec / frames if self.gui else 0.0
+        if self.gui and self.real_time:
+            frames = max(8, int(duration_sec * 16))
+            dt = duration_sec / frames
+        elif self.gui:
+            frames = max(6, int(duration_sec * 8))
+            dt = 0.0
+        else:
+            frames = max(4, int(duration_sec * 4))
+            dt = 0.0
         for i in range(1, frames + 1):
             a = i / frames
             pose = Pose(
@@ -320,7 +328,7 @@ class PyBulletSim:
             )
             self._set_ee_pose(pose)
             world.robot.ee_pose = pose
-            self._step(2)
+            self._step(1 if dt == 0.0 else 2)
             if dt > 0:
                 time.sleep(dt)
         self._set_ee_pose(target)
@@ -746,40 +754,41 @@ class PyBulletSim:
         result = sim_coupling_ops.wipe_inner(world, args)
         if not result.ok:
             return result
-        # Large, slow scrub so GUI users clearly see "wiping"
-        coupling = world.objects.get("coupling")
+        # Scrub motion; long wall-clock only with --real-time
+        cid = sim_coupling_ops.active_coupling_id(world)
+        coupling = world.objects.get(cid) if cid else None
         if coupling is not None:
             if self.gui:
-                print("  … wiping: dip + left/right scrub inside coupling")
+                print(f"  … wiping {coupling.display_name}: dip + scrub")
             start = world.robot.ee_pose
             cx, cy = coupling.xyz.x, coupling.xyz.y
             wipe_z = max(world.table_z + 0.05, coupling.xyz.z + 0.02)
-            # 1) dip deep into the bore
+            slow = self.gui and self.real_time
             self._goto_ee_visible(
                 world,
                 Pose(x=cx, y=cy, z=wipe_z, yaw=start.yaw),
-                duration_sec=1.0,
-                hold_sec=0.35,
+                duration_sec=0.9 if slow else 0.25,
+                hold_sec=0.25 if slow else 0.0,
             )
-            # 2) exaggerated left-right + forward-back strokes (≈3s)
             amp = 0.045
             path = [
-                Pose(x=cx - amp, y=cy, z=wipe_z, yaw=start.yaw),
-                Pose(x=cx + amp, y=cy, z=wipe_z, yaw=start.yaw),
                 Pose(x=cx - amp, y=cy, z=wipe_z, yaw=start.yaw),
                 Pose(x=cx + amp, y=cy, z=wipe_z, yaw=start.yaw),
                 Pose(x=cx, y=cy - amp, z=wipe_z, yaw=start.yaw),
                 Pose(x=cx, y=cy + amp, z=wipe_z, yaw=start.yaw),
                 Pose(x=cx, y=cy, z=wipe_z, yaw=start.yaw),
             ]
+            if not slow:
+                path = path[::2]  # fewer strokes when not real-time
             for pose in path:
-                self._goto_ee_visible(world, pose, duration_sec=0.45)
-            # 3) rise back up
+                self._goto_ee_visible(
+                    world, pose, duration_sec=0.4 if slow else 0.12
+                )
             self._goto_ee_visible(
                 world,
                 Pose(x=cx, y=cy, z=start.z, yaw=start.yaw),
-                duration_sec=0.8,
-                hold_sec=0.2,
+                duration_sec=0.7 if slow else 0.2,
+                hold_sec=0.15 if slow else 0.0,
             )
         self._settle(10)
         self._sync_world(world)
@@ -791,36 +800,45 @@ class PyBulletSim:
         if not result.ok:
             return result
         # Slow dip-hold-rise so measuring is obvious in the GUI
-        coupling = world.objects.get("coupling")
+        cid = sim_coupling_ops.active_coupling_id(world)
+        coupling = world.objects.get(cid) if cid else None
         ee = world.robot.ee_pose
         if self.gui:
-            print("  … measuring: dip into bore, hold, rise")
+            name = coupling.display_name if coupling else "coupling"
+            print(f"  … measuring {name}: dip into bore, hold, rise")
+        slow = self.gui and self.real_time
         if coupling is not None:
             mid_z = max(world.table_z + 0.05, coupling.xyz.z + 0.02)
             down = Pose(
                 x=coupling.xyz.x, y=coupling.xyz.y, z=mid_z, yaw=ee.yaw
             )
-            self._goto_ee_visible(world, down, duration_sec=1.1, hold_sec=0.9)
-            # small wiggle to read diameter
-            wiggle = 0.02
             self._goto_ee_visible(
-                world,
-                Pose(x=down.x - wiggle, y=down.y, z=mid_z, yaw=ee.yaw),
-                duration_sec=0.35,
+                world, down, duration_sec=1.0 if slow else 0.25, hold_sec=0.5 if slow else 0.0
             )
+            if slow:
+                wiggle = 0.02
+                self._goto_ee_visible(
+                    world,
+                    Pose(x=down.x - wiggle, y=down.y, z=mid_z, yaw=ee.yaw),
+                    duration_sec=0.3,
+                )
+                self._goto_ee_visible(
+                    world,
+                    Pose(x=down.x + wiggle, y=down.y, z=mid_z, yaw=ee.yaw),
+                    duration_sec=0.3,
+                )
+                self._goto_ee_visible(world, down, duration_sec=0.25, hold_sec=0.25)
             self._goto_ee_visible(
-                world,
-                Pose(x=down.x + wiggle, y=down.y, z=mid_z, yaw=ee.yaw),
-                duration_sec=0.35,
+                world, ee, duration_sec=0.9 if slow else 0.2, hold_sec=0.15 if slow else 0.0
             )
-            self._goto_ee_visible(world, down, duration_sec=0.3, hold_sec=0.4)
-            self._goto_ee_visible(world, ee, duration_sec=1.0, hold_sec=0.2)
         else:
             down = Pose(
                 x=ee.x, y=ee.y, z=max(world.table_z + 0.08, ee.z - 0.08), yaw=ee.yaw
             )
-            self._goto_ee_visible(world, down, duration_sec=1.0, hold_sec=0.6)
-            self._goto_ee_visible(world, ee, duration_sec=1.0)
+            self._goto_ee_visible(
+                world, down, duration_sec=0.9 if slow else 0.2, hold_sec=0.4 if slow else 0.0
+            )
+            self._goto_ee_visible(world, ee, duration_sec=0.9 if slow else 0.2)
         self._sync_world(world)
         return result
 

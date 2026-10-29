@@ -9,6 +9,7 @@ from actforge.capabilities.memory_caps import (
 )
 from actforge.capabilities.sense import SenseCapability
 from actforge.capabilities.skill_caps import LoadSkillCapability
+from actforge.inspection.coupling_ops import INSPECTION_ACTIONS, InspectionCapability
 from actforge.worldview.models import ActResult, WorldState
 
 
@@ -52,6 +53,8 @@ def build_default_registry(sim: Any | None = None) -> CapabilityRegistry:
         "done",
     ):
         reg.register(ActCapability(sim, name))
+    for name in INSPECTION_ACTIONS:
+        reg.register(InspectionCapability(name))
     reg.register(LoadSkillCapability())
     reg.register(NoteWriteCapability())
     reg.register(MemorySearchCapability())

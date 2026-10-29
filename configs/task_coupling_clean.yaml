@@ -1,21 +1,25 @@
 task_id: coupling_clean
 goal:
   type: coupling_clean_measure
-  object_id: coupling
+  object_id: coupling_A
   require_wiped: true
   require_measured: true
   require_empty_hand: true
   require_returned_home: true
+  # 表2：工件 A/B 均需归档（不合格也算流程完成）
+  expected_workpieces: ["A", "B"]
 
 limits:
-  max_steps: 48
-  timeout_sec: 300
+  max_steps: 80
+  timeout_sec: 600
 
 skills:
   dir: skills
   require_load_for_demo: true
 
 aliases:
-  coupling: ["接箍", "箍", "coupling"]
+  # 「接箍」映射到 A，避免解析出场景中不存在的 id=coupling
+  coupling_A: ["接箍A", "箍A", "coupling_A", "接箍", "箍", "coupling", "中径"]
+  coupling_B: ["接箍B", "箍B", "coupling_B"]
   rag: ["抹布", "擦布", "rag", "cloth"]
   ruler: ["测量尺", "量尺", "尺子", "ruler", "卡尺"]

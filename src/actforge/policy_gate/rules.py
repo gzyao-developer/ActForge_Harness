@@ -41,8 +41,21 @@ def check(
     if action == "measure_inner" and world.robot.holding != "ruler":
         return GateResult(allowed=False, reason="need_holding_ruler")
 
+    if action == "measure_inner" and world.task_flags.get("measure_allowed") is False:
+        return GateResult(allowed=False, reason="measure_not_allowed")
+
     if action == "return_home" and world.home_ee is None:
         return GateResult(allowed=False, reason="no_home_ee")
+
+    if action == "cleaning_review":
+        result = str((args or {}).get("result") or (args or {}).get("status") or "").lower()
+        if not result:
+            return GateResult(allowed=False, reason="missing_review_result")
+
+    if action == "task_admit" and not (
+        (args or {}).get("workpiece") or (args or {}).get("id")
+    ):
+        return GateResult(allowed=False, reason="missing_workpiece")
 
     # G7 load_skill
     if action == "load_skill":

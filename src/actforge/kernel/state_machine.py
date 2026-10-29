@@ -6,11 +6,13 @@ from typing import Any, Optional, Protocol
 from actforge.adapters.llm_openai import LLMPolicyError
 from actforge.evaluate.models import EvaluateResult
 from actforge.evaluate.step_eval import StepEvaluator
+from actforge.inspection.assist import CouplingFlowAssist
 from actforge.kernel import events
 from actforge.policy_gate.rules import Gate
 from actforge.recall.service import RecallService, TaskOutcome
 from actforge.skillbook.catalog import Skillbook
 from actforge.util.logging_jsonl import EventLog
+from actforge.util.process_log import ProcessLog, format_inspection_line
 from actforge.worldview.models import ActionIntent, ActResult, WorldState
 from actforge.worldview.snapshot import Snapshot, build_snapshot
 
@@ -39,6 +41,7 @@ def run_task(
     evaluator: StepEvaluator | None = None,
     evaluate_cfg: dict[str, Any] | None = None,
     sim: Any | None = None,
+    process_log: ProcessLog | None = None,
 ) -> TaskOutcome:
     """
     Control loop:
@@ -67,6 +70,8 @@ def run_task(
     recall.on_task_start(instruction, goal_object_id)
     last_result: ActResult | None = None
     last_evaluation: Optional[dict[str, Any]] = None
+    flow_assist = CouplingFlowAssist()
+    flow_assist.bind_world(world)
 
     try:
         for step in range(1, max_steps + 1):
@@ -115,6 +120,8 @@ def run_task(
                 recall.on_task_end(outcome, instruction, goal_object_id)
                 event_log.emit(events.TASK_FINISHED, {"status": "failed", "reason": "user_abort"})
                 return outcome
+
+            intent = flow_assist.override_decide(intent, world)
 
             event_log.emit(events.DECIDE_DONE, {"step": step, "intent": intent.model_dump()})
             if print_step:
@@ -179,6 +186,12 @@ def run_task(
                 last_result = act_result
                 recall.record_lesson(step, act_result, intent.args)
 
+                insp = (act_result.observation or {}).get("inspection_event")
+                if insp:
+                    event_log.emit(events.INSPECTION_EVENT, dict(insp))
+                    if process_log is not None:
+                        process_log.line(format_inspection_line(insp))
+
                 if print_step:
                     ee = world.robot.ee_pose
                     print(
@@ -188,6 +201,8 @@ def run_task(
                     )
 
                 if not eval_enabled or evaluator is None:
+                    if process_log is not None:
+                        _log_act_to_process(process_log, intent.action, act_result)
                     break
 
                 eval_result = evaluator.evaluate(
@@ -211,6 +226,9 @@ def run_task(
 
                 if eval_result.passed:
                     same_fail_key, same_fail_count = None, 0
+                    # 只在评估通过后写流程日志，避免重试刷屏
+                    if process_log is not None:
+                        _log_act_to_process(process_log, intent.action, act_result)
                     break
 
                 # grasp_miss: identical close_gripper retries won't help; hand back to DECIDE
@@ -218,6 +236,8 @@ def run_task(
                     intent.action == "close_gripper"
                     and act_result.message == "grasp_miss"
                 ):
+                    if process_log is not None:
+                        _log_act_to_process(process_log, intent.action, act_result)
                     if rewind_on_retry:
                         _restore_world_inplace(world, world_before)
                         if sim is not None and hasattr(sim, "restore_from_world"):
@@ -290,10 +310,30 @@ def run_task(
                             "reason": eval_result.reason,
                         },
                     )
+                if process_log is not None:
+                    _log_act_to_process(process_log, intent.action, act_result)
                 if print_step:
                     print(
                         f"[step {step}] EVAL exhausted → continue "
                         f"(score={eval_result.score:.2f})"
+                    )
+
+            if last_result is not None:
+                flow_assist.record_executed(intent, last_result)
+                if last_result.ok:
+                    last_result = _run_flow_followups(
+                        flow_assist,
+                        intent,
+                        last_result,
+                        world,
+                        gate=gate,
+                        registry=registry,
+                        skillbook=skillbook,
+                        recall=recall,
+                        event_log=event_log,
+                        process_log=process_log,
+                        step=step,
+                        print_step=print_step,
                     )
 
             if last_result and not last_result.ok and not (
@@ -348,6 +388,8 @@ def run_task(
                         "skill_loaded": skill_loaded,
                     },
                 )
+                if process_log is not None:
+                    process_log.line(f"验收通过 steps={step}")
                 return outcome
 
             if intent.action == "done" and not verify.success:
@@ -368,6 +410,62 @@ def run_task(
     return outcome
 
 
+def _run_flow_followups(
+    flow_assist: CouplingFlowAssist,
+    intent: ActionIntent,
+    act_result: ActResult,
+    world: WorldState,
+    *,
+    gate: Gate,
+    registry: Any,
+    skillbook: Skillbook,
+    recall: RecallService,
+    event_log: EventLog,
+    process_log: ProcessLog | None,
+    step: int,
+    print_step: bool,
+) -> ActResult:
+    """Execute auto business steps (e.g. wipe_return after place_home)."""
+    cur_intent = intent
+    cur_result = act_result
+    for _ in range(4):
+        followups = flow_assist.followups_after(cur_intent, cur_result, world)
+        if not followups:
+            break
+        for fu in followups:
+            gate_result = gate.check(fu, world, skillbook=skillbook)
+            if not gate_result.allowed:
+                break
+            cur_result = registry.execute(
+                fu.action,
+                world,
+                fu.args,
+                ctx={"skillbook": skillbook, "recall": recall},
+            )
+            event_log.emit(
+                events.ACT_DONE,
+                {"step": step, "attempt": 1, "flow_assist": True, **cur_result.model_dump()},
+            )
+            insp = (cur_result.observation or {}).get("inspection_event")
+            if insp:
+                event_log.emit(events.INSPECTION_EVENT, dict(insp))
+                if process_log is not None:
+                    process_log.line(format_inspection_line(insp))
+            if process_log is not None:
+                _log_act_to_process(process_log, fu.action, cur_result)
+            if print_step:
+                print(
+                    f"[step {step}] ACT(assist) "
+                    f"{'ok' if cur_result.ok else 'fail'} {cur_result.message}"
+                )
+            flow_assist.record_executed(fu, cur_result)
+            recall.record_lesson(step, cur_result, fu.args)
+            cur_intent = fu
+            if not cur_result.ok:
+                return cur_result
+    return cur_result
+
+
 def _restore_world_inplace(dst: WorldState, src: WorldState) -> None:
     """Copy checkpoint poses/gripper/holding into the live world object."""
     dst.robot = src.robot.model_copy(deep=True)
@@ -380,6 +478,40 @@ def _bump_fail(
     if key == prev_key:
         return key, prev_count + 1
     return key, 1
+
+
+def _log_act_to_process(
+    process_log: ProcessLog, action: str, act_result: ActResult
+) -> None:
+    """Only log a few physical milestones (business events already logged)."""
+    if not act_result.ok:
+        if action in (
+            "wipe_inner",
+            "measure_inner",
+            "close_gripper",
+            "cleaning_review",
+            "rule_judge",
+            "archive_record",
+        ):
+            process_log.line(f"  · 失败 {action}: {act_result.message}")
+        return
+    if action == "wipe_inner":
+        process_log.line("  · 执行擦拭")
+    elif action == "measure_inner":
+        delta = (act_result.observation or {}).get("delta_d_mm")
+        if delta is not None:
+            process_log.line(f"  · 执行测量 Δd={float(delta):+.3f}")
+        else:
+            process_log.line("  · 执行测量")
+    elif action == "return_home":
+        process_log.line("  · 回到初始位")
+    elif action == "close_gripper" and act_result.message.startswith("grasped_"):
+        oid = act_result.message.replace("grasped_", "")
+        name = {"rag": "抹布", "ruler": "测量尺", "can_cola": "易拉罐"}.get(oid, oid)
+        process_log.line(f"  · 抓取 {name}")
+    elif action == "lift" and "can" in (act_result.message or ""):
+        process_log.line(f"  · {act_result.message}")
+
 
 
 def _finish_failed(

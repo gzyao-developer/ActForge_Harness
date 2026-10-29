@@ -2,6 +2,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from actforge.inspection.guide import inspection_progress
 from actforge.worldview.models import ALLOWED_ACTIONS, ActResult, WorldState
 
 
@@ -70,6 +71,18 @@ def build_snapshot(
                 "body_excerpt": body,
             }
 
+    recall_block: dict[str, Any] = {
+        **(recall or {}),
+        "task_flags": dict(world.task_flags or {}),
+        "object_homes": {
+            oid: pose.model_dump() for oid, pose in (world.object_homes or {}).items()
+        },
+        "home_ee": world.home_ee.model_dump() if world.home_ee else None,
+    }
+    # Coupling A/B inspection: expose phase hint for LLM
+    if world.coupling_cfg.get("workpieces"):
+        recall_block["inspection"] = inspection_progress(world)
+
     return Snapshot(
         instruction=instruction,
         goal_object_id=goal_object_id,
@@ -85,13 +98,6 @@ def build_snapshot(
         last_evaluation=last_evaluation,
         skill_catalog=skill_catalog,
         active_skill=active_skill,
-        recall={
-            **(recall or {}),
-            "task_flags": dict(world.task_flags or {}),
-            "object_homes": {
-                oid: pose.model_dump() for oid, pose in (world.object_homes or {}).items()
-            },
-            "home_ee": world.home_ee.model_dump() if world.home_ee else None,
-        },
+        recall=recall_block,
         allowed_actions=list(ALLOWED_ACTIONS),
     )

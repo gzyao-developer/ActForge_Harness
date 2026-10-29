@@ -17,6 +17,7 @@ from actforge.recall.service import RecallService
 from actforge.skillbook.catalog import Skillbook
 from actforge.util.config import load_recall_config, load_scene, load_task, resolve_goal_object_id
 from actforge.util.logging_jsonl import EventLog
+from actforge.util.process_log import ProcessLog, write_inspection_summary
 from actforge.util.task_router import resolve_task_preset
 from actforge.verify.coupling_clean import CouplingCleanVerifier
 from actforge.verify.pick_can import PickCanVerifier
@@ -97,6 +98,9 @@ def run(
     default_goal = goal.get("object_id", "can_cola")
     aliases = task_cfg.get("aliases") or {}
     goal_object_id = resolve_goal_object_id(instruction, aliases, default_goal)
+    # Coupling scene uses coupling_A/B; never keep a stale bare "coupling" id
+    if resolved_id == "coupling_clean" and goal_object_id not in ("coupling_A", "coupling_B"):
+        goal_object_id = "coupling_A"
     limits = dict(task_cfg.get("limits", {}))
     if max_steps is not None:
         limits["max_steps"] = max_steps
@@ -121,6 +125,8 @@ def run(
     run_dir = runs_path / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     event_log = EventLog(run_id, run_dir / "events.jsonl")
+    process_path = run_dir / "process.log"
+    process_log = ProcessLog(process_path, echo=True)
 
     skillbook = Skillbook(skills_path)
     recall = RecallService(recall_cfg, event_log=event_log)
@@ -128,6 +134,7 @@ def run(
     try:
         backend = create_sim(sim, gui=gui, real_time=real_time)
     except Exception as e:  # noqa: BLE001
+        process_log.close()
         typer.echo(f"Failed to create sim backend '{sim}': {e}", err=True)
         raise typer.Exit(code=2)
 
@@ -138,11 +145,13 @@ def run(
     gate = Gate()
 
     if resolved_id == "coupling_clean":
+        expected_wp = goal.get("expected_workpieces") or ["A", "B"]
         verifier: object = CouplingCleanVerifier(
             require_wiped=bool(goal.get("require_wiped", True)),
             require_measured=bool(goal.get("require_measured", True)),
             require_empty_hand=bool(goal.get("require_empty_hand", True)),
             require_returned_home=bool(goal.get("require_returned_home", True)),
+            expected_workpieces=list(expected_wp),
         )
     else:
         min_lift_z = float(goal.get("min_lift_z", 0.10))
@@ -160,10 +169,17 @@ def run(
 
         pol = LLMPolicy(system_prompt_path=prompt_path, verbose=verbose)
     else:
+        process_log.close()
         typer.echo(f"Unknown policy: {policy}", err=True)
         raise typer.Exit(code=2)
 
-    typer.echo(f"task_id={resolved_id} scene={scene_path.name} policy={policy} sim={sim}")
+    task_title = {
+        "coupling_clean": "接箍中径检测",
+        "pick_can": "桌面抓取",
+    }.get(resolved_id, resolved_id)
+    process_log.line(f"任务: {task_title}")
+    process_log.line(f"指令: {instruction}")
+    process_log.line("")
     if verbose:
         typer.echo(f"goal_object_id={goal_object_id}")
         typer.echo(f"require_load_skill={require_load}")
@@ -184,16 +200,18 @@ def run(
             recall=recall,
             event_log=event_log,
             goal_object_id=goal_object_id,
-            print_step=True,
+            print_step=verbose,  # 逐步 DECIDE/GATE/ACT 仅 --verbose
             verbose=verbose,
             require_load_skill=require_load,
             evaluator=evaluator,
             evaluate_cfg=evaluate_cfg,
             sim=backend,
+            process_log=process_log,
         )
     except KeyboardInterrupt:
-        typer.echo("TASK_RESULT status=failed reason=user_abort")
-        typer.echo(f"log={run_dir / 'events.jsonl'}")
+        process_log.line("结果: failed (user_abort)")
+        process_log.close()
+        typer.echo(f"process_log={process_path}")
         if hasattr(backend, "close"):
             backend.close()
         raise typer.Exit(code=1)
@@ -203,27 +221,35 @@ def run(
 
     holding = world.robot.holding
     flags = world.task_flags or {}
-    extra = ""
+    process_log.line("")
     if resolved_id == "coupling_clean":
-        extra = (
-            f" wiped={flags.get('coupling_wiped')} measured={flags.get('coupling_measured')}"
-            f" diameter_mm={flags.get('inner_diameter_mm')}"
+        results = flags.get("workpiece_results") or {}
+        write_inspection_summary(process_log, list(flags.get("inspection_log") or []))
+        for wp in flags.get("archived_workpieces") or []:
+            r = results.get(wp) or {}
+            q = "合格" if r.get("quality") == "qualified" else "不合格"
+            d = r.get("delta_d_mm")
+            d_s = f" Δd={float(d):+.3f}" if d is not None else ""
+            process_log.line(f"接箍{wp}: {q}{d_s}")
+        process_log.line(
+            f"结果: {outcome.status} | steps={outcome.steps} | "
+            f"archived={flags.get('archived_workpieces')}"
         )
-        lift_str = "n/a"
     else:
         lift_z = None
         if holding and holding in world.objects:
             lift_z = world.objects[holding].xyz.z - world.table_z
-        lift_str = f"{lift_z:.2f}" if lift_z is not None else "n/a"
-
-    typer.echo(
-        f"TASK_RESULT status={outcome.status} steps={outcome.steps} "
-        f"holding={holding} lift_z={lift_str}{extra}"
-    )
+        process_log.line(
+            f"结果: {outcome.status} | steps={outcome.steps} | "
+            f"holding={holding} | lift_z="
+            f"{f'{lift_z:.2f}' if lift_z is not None else 'n/a'}"
+        )
     if outcome.reason:
-        typer.echo(f"fail_reason={outcome.reason}")
-    typer.echo(f"log={run_dir / 'events.jsonl'}")
-    typer.echo(f"sim={sim} task_id={resolved_id}")
+        process_log.line(f"原因: {outcome.reason}")
+    process_log.line(f"明细事件: {run_dir / 'events.jsonl'}")
+    process_log.close()
+
+    typer.echo(f"process_log={process_path}")
 
     if outcome.status != "success":
         raise typer.Exit(code=1)
